@@ -2,53 +2,55 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:gravity="center_horizontal"
     android:orientation="vertical"
-    android:padding="24dp">
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Surveillance désactivée"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <ImageButton
+            android:id="@+id/gear"
+            android:layout_width="52dp"
+            android:layout_height="52dp"
+            android:background="@android:color/transparent"
+            android:contentDescription="Réglages"
+            android:src="@android:drawable/ic_menu_preferences"
+            android:tint="#333333" />
+    </LinearLayout>
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:layout_weight="1"
+        android:background="#000000" />
 
     <TextView
-        android:id="@+id/status"
-        android:layout_width="wrap_content"
+        android:id="@+id/levels"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="48dp"
-        android:text="Surveillance désactivée"
-        android:textSize="22sp"
-        android:textStyle="bold" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="40dp"
-        android:text="Compte à rebours avant activation (secondes)" />
-
-    <EditText
-        android:id="@+id/countdown"
-        android:layout_width="120dp"
-        android:layout_height="wrap_content"
-        android:gravity="center"
-        android:inputType="number"
-        android:text="10" />
-
-    <Switch
-        android:id="@+id/flash"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
-        android:checked="true"
-        android:text="Allumer le flash pendant l'enregistrement  " />
+        android:minLines="2"
+        android:textSize="14sp" />
 
     <Button
         android:id="@+id/toggle"
         android:layout_width="match_parent"
-        android:layout_height="96dp"
-        android:layout_marginTop="48dp"
+        android:layout_height="84dp"
+        android:layout_marginTop="8dp"
         android:text="ACTIVER"
-        android:textSize="24sp" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
-        android:gravity="center"
-        android:text="Vidéos de 30 s max, enregistrées dans Films/Surveillance sur le téléphone." />
+        android:textSize="22sp" />
 </LinearLayout>

@@ -20,6 +20,9 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
@@ -47,32 +50,36 @@ class SurveillanceService : LifecycleService() {
     companion object {
         const val ACTION_START = "com.example.surveillance.START"
         const val ACTION_STOP = "com.example.surveillance.STOP"
-        const val EXTRA_COUNTDOWN = "countdown"
-        const val EXTRA_FLASH = "flash"
         private const val CHANNEL_ID = "surveillance"
         private const val NOTIF_ID = 1
 
-        // Réglages (ajustez si trop / pas assez sensible)
-        const val MAX_CLIP_MS = 30_000L      // durée max d'une vidéo
-        const val COOLDOWN_MS = 3_000L       // pause entre deux vidéos
-        const val MOTION_THRESHOLD = 12.0    // plus petit = plus sensible
-        const val SOUND_THRESHOLD = 3000     // plus petit = plus sensible (max 32767)
-
         @Volatile var state: State = State.OFF
         @Volatile var secondsLeft: Int = 0
+        @Volatile var motionPct = 0.0
+        @Volatile var motionThr = 0.0
+        @Volatile var soundPct = 0.0
+        @Volatile var soundThr = 0.0
         var listener: (() -> Unit)? = null
+
+        private var previewUseCase: Preview? = null
+        private var previewSurface: Preview.SurfaceProvider? = null
+
+        /** Appelé par l'écran principal (thread principal) pour afficher l'aperçu. */
+        fun setPreviewSurface(p: Preview.SurfaceProvider?) {
+            previewSurface = p
+            previewUseCase?.setSurfaceProvider(p)
+        }
     }
 
+    private lateinit var settings: Settings
     private val handler = Handler(Looper.getMainLooper())
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
-    private var useFlash = true
     private var prev: ByteArray? = null
-    private var armedAt = 0L
-    private var cooldownUntil = 0L
+    private var ignoreUntil = 0L
     private var stopping = false
     @Volatile private var monitoring = false
     private var soundThread: Thread? = null
@@ -82,11 +89,16 @@ class SurveillanceService : LifecycleService() {
     private val tick = object : Runnable {
         override fun run() {
             secondsLeft--
-            if (secondsLeft <= 0) arm() else {
+            if (secondsLeft <= 0) becomeArmed() else {
                 setState(State.COUNTDOWN)
                 handler.postDelayed(this, 1000)
             }
         }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        settings = Settings(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -94,36 +106,50 @@ class SurveillanceService : LifecycleService() {
         when (intent?.action) {
             ACTION_START -> {
                 goForeground()
-                if (state == State.OFF) begin(intent)
+                if (state == State.OFF) begin()
             }
             ACTION_STOP -> requestShutdown()
         }
         return START_NOT_STICKY
     }
 
-    // ---------- Cycle de vie de la surveillance ----------
+    // ---------- Cycle de vie ----------
 
-    private fun begin(intent: Intent) {
-        useFlash = intent.getBooleanExtra(EXTRA_FLASH, true)
-        val secs = intent.getIntExtra(EXTRA_COUNTDOWN, 10).coerceIn(0, 3600)
+    private fun begin() {
         stopping = false
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "surveillance:wl")
             .apply { acquire() }
+        val secs = settings.countdown.coerceIn(0, 3600)
         secondsLeft = secs
-        if (secs > 0) {
-            setState(State.COUNTDOWN)
-            handler.postDelayed(tick, 1000)
-        } else arm()
+        motionPct = 0.0; soundPct = 0.0
+        setState(State.COUNTDOWN)
+        bindCamera()                       // aperçu visible dès le compte à rebours
+        if (settings.soundOn) startSoundMonitor()
+        if (secs > 0) handler.postDelayed(tick, 1000) else becomeArmed()
     }
 
-    private fun arm() {
+    private fun becomeArmed() {
+        ignoreUntil = SystemClock.elapsedRealtime() + 2000
+        prev = null
+        setState(State.ARMED)
+        if (settings.soundOn) startSoundMonitor()
+    }
+
+    private fun bindCamera() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             if (stopping || state == State.OFF) return@addListener
             try {
                 val provider = future.get()
                 cameraProvider = provider
+                val ratio = ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                    .build()
+                val preview = Preview.Builder().setResolutionSelector(ratio).build()
+                preview.setSurfaceProvider(previewSurface)
+                previewUseCase = preview
+
                 val recorder = Recorder.Builder()
                     .setQualitySelector(
                         QualitySelector.from(
@@ -133,18 +159,21 @@ class SurveillanceService : LifecycleService() {
                     ).build()
                 val vc = VideoCapture.withOutput(recorder)
                 videoCapture = vc
+
                 val analysis = ImageAnalysis.Builder()
+                    .setResolutionSelector(ratio)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                 analysis.setAnalyzer(analysisExecutor) { analyze(it) }
+
                 provider.unbindAll()
                 camera = provider.bindToLifecycle(
-                    this, CameraSelector.DEFAULT_BACK_CAMERA, vc, analysis
+                    this, CameraSelector.DEFAULT_BACK_CAMERA, preview, vc, analysis
                 )
-                armedAt = SystemClock.elapsedRealtime()
+                // Flash allumé en permanence pendant toute la surveillance
+                if (settings.flash) camera?.cameraControl?.enableTorch(true)
+                ignoreUntil = SystemClock.elapsedRealtime() + 3000
                 prev = null
-                setState(State.ARMED)
-                startSoundMonitor()
             } catch (e: Exception) {
                 requestShutdown()
             }
@@ -164,6 +193,7 @@ class SurveillanceService : LifecycleService() {
         stopSoundMonitor()
         camera?.cameraControl?.enableTorch(false)
         cameraProvider?.unbindAll()
+        previewUseCase = null
         if (wakeLock?.isHeld == true) wakeLock?.release()
         state = State.OFF
         secondsLeft = 0
@@ -188,13 +218,17 @@ class SurveillanceService : LifecycleService() {
                 val rowStart = y * step * stride
                 for (x in 0 until cw) cur[i++] = buf.get(rowStart + x * step)
             }
+            val thr = 0.3 + (100 - settings.motionSens) * 0.12   // % de pixels qui changent
+            motionThr = thr
             val p = prev
             if (p != null && p.size == cur.size) {
-                var sum = 0L
+                var changed = 0
                 for (k in cur.indices) {
-                    sum += abs((cur[k].toInt() and 0xFF) - (p[k].toInt() and 0xFF))
+                    if (abs((cur[k].toInt() and 0xFF) - (p[k].toInt() and 0xFF)) > 25) changed++
                 }
-                if (sum.toDouble() / cur.size > MOTION_THRESHOLD) trigger()
+                val pct = 100.0 * changed / cur.size
+                motionPct = max(pct, motionPct * 0.9)
+                if (settings.motionOn && pct > thr) trigger()
             }
             prev = cur
         } finally {
@@ -223,7 +257,11 @@ class SurveillanceService : LifecycleService() {
                 if (n > 0) {
                     var peak = 0
                     for (k in 0 until n) peak = max(peak, abs(buf[k].toInt()))
-                    if (peak > SOUND_THRESHOLD) trigger()
+                    val pct = peak * 100.0 / 32767
+                    val thr = 1.0 + (100 - settings.soundSens) * 0.3   // % du volume max
+                    soundThr = thr
+                    soundPct = max(pct, soundPct * 0.85)
+                    if (settings.soundOn && pct > thr) trigger()
                 }
             }
             rec.stop()
@@ -239,19 +277,17 @@ class SurveillanceService : LifecycleService() {
 
     private fun trigger() {
         handler.post {
-            val now = SystemClock.elapsedRealtime()
-            if (state == State.ARMED && now - armedAt > 2000 && now > cooldownUntil) startClip()
+            if (state == State.ARMED && SystemClock.elapsedRealtime() > ignoreUntil) startClip()
         }
     }
 
-    // ---------- Enregistrement ----------
+    // ---------- Enregistrement (uniquement sur détection) ----------
 
     @SuppressLint("MissingPermission")
     private fun startClip() {
         val vc = videoCapture ?: return
         setState(State.RECORDING)
         stopSoundMonitor() // libère le micro pour la vidéo
-        if (useFlash) camera?.cameraControl?.enableTorch(true)
 
         val name = "surv_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val values = ContentValues().apply {
@@ -268,20 +304,17 @@ class SurveillanceService : LifecycleService() {
             .start(ContextCompat.getMainExecutor(this)) { ev ->
                 if (ev is VideoRecordEvent.Finalize) onClipFinalized()
             }
-        handler.postDelayed(stopClipRunnable, MAX_CLIP_MS)
+        handler.postDelayed(stopClipRunnable, settings.clipSeconds.coerceIn(5, 30) * 1000L)
     }
 
     private fun onClipFinalized() {
         recording = null
         handler.removeCallbacks(stopClipRunnable)
-        camera?.cameraControl?.enableTorch(false)
         if (stopping) { finishShutdown(); return }
-        val now = SystemClock.elapsedRealtime()
-        cooldownUntil = now + COOLDOWN_MS
-        armedAt = now
+        ignoreUntil = SystemClock.elapsedRealtime() + max(settings.cooldown, 2) * 1000L
         prev = null
         setState(State.ARMED)
-        startSoundMonitor()
+        if (settings.soundOn) startSoundMonitor()
     }
 
     // ---------- Notification / état ----------
@@ -328,6 +361,7 @@ class SurveillanceService : LifecycleService() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
         monitoring = false
+        previewUseCase = null
         analysisExecutor.shutdown()
         if (wakeLock?.isHeld == true) wakeLock?.release()
         state = State.OFF
