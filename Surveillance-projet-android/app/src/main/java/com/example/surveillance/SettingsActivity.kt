@@ -32,6 +32,7 @@ class SettingsActivity : Activity() {
         bindSeek(R.id.motionSeek, R.id.motionVal, s.motionSens) { s.motionSens = it }
         bindSeek(R.id.soundSeek, R.id.soundVal, s.soundSens) { s.soundSens = it }
 
+        findViewById<Button>(R.id.battery).setOnClickListener { requestIgnoreBattery(this) }
         findViewById<Button>(R.id.done).setOnClickListener { finish() }
     }
 

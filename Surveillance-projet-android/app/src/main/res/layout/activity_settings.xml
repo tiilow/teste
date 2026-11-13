@@ -103,6 +103,13 @@
             android:text="Astuce : sur l'écran principal, les valeurs en direct (mouvement et son) et leur seuil s'affichent pour t'aider à régler la sensibilité. Pour activer ou désactiver la détection du bruit, arrête puis relance la surveillance." />
 
         <Button
+            android:id="@+id/battery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Autoriser l'appli à rester active (batterie)" />
+
+        <Button
             android:id="@+id/done"
             android:layout_width="match_parent"
             android:layout_height="64dp"

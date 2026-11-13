@@ -78,7 +78,8 @@ class SurveillanceService : LifecycleService() {
     private var camera: Camera? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
-    private var prev: ByteArray? = null
+    @Volatile private var prev: ByteArray? = null
+    private var lastZoneKey = 0
     private var ignoreUntil = 0L
     private var stopping = false
     @Volatile private var monitoring = false
@@ -212,21 +213,44 @@ class SurveillanceService : LifecycleService() {
             val step = 8
             val cw = image.width / step
             val ch = image.height / step
-            val cur = ByteArray(cw * ch)
-            var i = 0
-            for (y in 0 until ch) {
-                val rowStart = y * step * stride
-                for (x in 0 until cw) cur[i++] = buf.get(rowStart + x * step)
+
+            // Zone choisie (image à l'endroit) -> repère du buffer de la caméra
+            val zl = settings.zoneL
+            val zt = settings.zoneT
+            val zr = settings.zoneR
+            val zb = settings.zoneB
+            val z = when (image.imageInfo.rotationDegrees) {
+                90 -> floatArrayOf(zt, zb, 1f - zr, 1f - zl)
+                180 -> floatArrayOf(1f - zr, 1f - zl, 1f - zb, 1f - zt)
+                270 -> floatArrayOf(1f - zb, 1f - zt, zl, zr)
+                else -> floatArrayOf(zl, zr, zt, zb)
             }
-            val thr = 0.3 + (100 - settings.motionSens) * 0.12   // % de pixels qui changent
+            val cx0 = (z[0] * cw).toInt().coerceIn(0, cw - 1)
+            val cx1 = Math.ceil((z[1] * cw).toDouble()).toInt().coerceIn(cx0 + 1, cw)
+            val cy0 = (z[2] * ch).toInt().coerceIn(0, ch - 1)
+            val cy1 = Math.ceil((z[3] * ch).toDouble()).toInt().coerceIn(cy0 + 1, ch)
+
+            val key = z.contentHashCode()
+            if (key != lastZoneKey) { lastZoneKey = key; prev = null }
+
+            val cur = ByteArray(cw * ch)
+            for (y in cy0 until cy1) {
+                val rowStart = y * step * stride
+                for (x in cx0 until cx1) cur[y * cw + x] = buf.get(rowStart + x * step)
+            }
+
+            val thr = 0.3 + (100 - settings.motionSens) * 0.12   // % de pixels de la zone qui changent
             motionThr = thr
             val p = prev
             if (p != null && p.size == cur.size) {
                 var changed = 0
-                for (k in cur.indices) {
-                    if (abs((cur[k].toInt() and 0xFF) - (p[k].toInt() and 0xFF)) > 25) changed++
+                for (y in cy0 until cy1) {
+                    for (x in cx0 until cx1) {
+                        val k = y * cw + x
+                        if (abs((cur[k].toInt() and 0xFF) - (p[k].toInt() and 0xFF)) > 25) changed++
+                    }
                 }
-                val pct = 100.0 * changed / cur.size
+                val pct = 100.0 * changed / ((cx1 - cx0) * (cy1 - cy0))
                 motionPct = max(pct, motionPct * 0.9)
                 if (settings.motionOn && pct > thr) trigger()
             }
